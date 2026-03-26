@@ -36,9 +36,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.drag
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -278,37 +275,51 @@ fun StageArea(
                     .pointerInput(project.stageWidth, project.stageHeight, animatedDancers) {
                         if (isPlaying || videoExportProgress != null) return@pointerInput
                         
-                        awaitEachGesture {
-                            val down = awaitFirstDown()
-                            val hitRadius = 120f
-                            val tappedDancer = animatedDancers.find { d ->
+                        detectTapGestures(onTap = { offset ->
+                            val hitRadius = 100f
+                            val tapped = animatedDancers.find { d ->
                                 val canvasX = (d.x / project.stageWidth) * size.width
                                 val canvasY = (d.y / project.stageHeight) * size.height
-                                val dx = canvasX - down.position.x
-                                val dy = canvasY - down.position.y
+                                val dx = canvasX - offset.x
+                                val dy = canvasY - offset.y
                                 (dx * dx + dy * dy) < hitRadius * hitRadius
                             }
-                            
-                            if (tappedDancer != null) {
-                                onSelectDancer(tappedDancer.id)
-                                onDragStart(tappedDancer.id)
-                                var currentDancer = tappedDancer
-                                drag(down.id) { change ->
-                                    change.consume()
-                                    val moveFactorX = project.stageWidth / size.width
-                                    val moveFactorY = project.stageHeight / size.height
-                                    val newX = currentDancer.x + (change.positionChange().x * moveFactorX)
-                                    val newY = currentDancer.y + (change.positionChange().y * moveFactorY)
-                                    val boundedX = newX.coerceIn(0f, project.stageWidth)
-                                    val boundedY = newY.coerceIn(0f, project.stageHeight)
-                                    onUpdateDancerPosition(tappedDancer.id, boundedX, boundedY)
-                                    currentDancer = currentDancer.copy(x = boundedX, y = boundedY)
+                            onSelectDancer(tapped?.id)
+                        })
+                    }
+                    .pointerInput(project.stageWidth, project.stageHeight, animatedDancers) {
+                        if (isPlaying || videoExportProgress != null) return@pointerInput
+                        
+                        detectDragGestures(
+                            onDragStart = { offset ->
+                                val hitRadius = 100f
+                                val id = animatedDancers.find { d ->
+                                    val canvasX = (d.x / project.stageWidth) * size.width
+                                    val canvasY = (d.y / project.stageHeight) * size.height
+                                    val dx = canvasX - offset.x
+                                    val dy = canvasY - offset.y
+                                    (dx * dx + dy * dy) < hitRadius * hitRadius
+                                }?.id
+                                onDragStart(id)
+                                if (id != null) onSelectDancer(id)
+                            },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                draggedDancerId?.let { id ->
+                                    val dancer = animatedDancers.find { it.id == id }
+                                    dancer?.let {
+                                        // User recommended scaling logic
+                                        val moveFactorX = project.stageWidth / size.width
+                                        val moveFactorY = project.stageHeight / size.height
+                                        val nextX = (it.x + (dragAmount.x * moveFactorX)).coerceIn(0f, project.stageWidth)
+                                        val nextY = (it.y + (dragAmount.y * moveFactorY)).coerceIn(0f, project.stageHeight)
+                                        onUpdateDancerPosition(id, nextX, nextY)
+                                    }
                                 }
-                                onDragEnd()
-                            } else {
-                                onSelectDancer(null)
-                            }
-                        }
+                            },
+                            onDragEnd = { onDragEnd() },
+                            onDragCancel = { onDragEnd() }
+                        )
                     }
             ) {
                 Canvas(modifier = Modifier.fillMaxSize()) {
@@ -375,7 +386,7 @@ fun DetailPanel(
                     }
                 }
                 Row(modifier = Modifier.padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { viewModel.mirrorFormationHorizontal() }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = primaryColor)) {
+                    Button(onClick = { viewModel.mirrorFormationHorizontal() }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = primaryGreen)) {
                         Icon(Icons.Default.Flip, null); Spacer(Modifier.width(4.dp)); Text("Mirror")
                     }
                     Button(onClick = { viewModel.copyFromPrevious() }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
