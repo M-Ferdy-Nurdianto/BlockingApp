@@ -386,7 +386,7 @@ fun DetailPanel(
                     }
                 }
                 Row(modifier = Modifier.padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { viewModel.mirrorFormationHorizontal() }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = primaryGreen)) {
+                    Button(onClick = { viewModel.mirrorFormationHorizontal() }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = primaryColor)) {
                         Icon(Icons.Default.Flip, null); Spacer(Modifier.width(4.dp)); Text("Mirror")
                     }
                     Button(onClick = { viewModel.copyFromPrevious() }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
