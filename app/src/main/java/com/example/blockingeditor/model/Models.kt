@@ -8,7 +8,8 @@ data class Dancer(
     var name: String,
     var color: Long,
     var x: Float,
-    var y: Float
+    var y: Float,
+    val mirrorOfId: Int? = null // ID of dancer this one mirrors horizontally
 )
 
 @Serializable

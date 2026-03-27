@@ -10,8 +10,9 @@ object ProjectStorage {
     private val json = Json { prettyPrint = true; ignoreUnknownKeys = true }
 
     fun saveProject(context: Context, project: Project, filename: String = "project.json") {
+        val safeFilename = if (filename.endsWith(".json")) filename else "$filename.json"
         val jsonString = json.encodeToString(project)
-        context.openFileOutput(filename, Context.MODE_PRIVATE).use {
+        context.openFileOutput(safeFilename, Context.MODE_PRIVATE).use {
             it.write(jsonString.toByteArray())
         }
     }
@@ -26,5 +27,14 @@ object ProjectStorage {
             e.printStackTrace()
             null
         }
+    }
+
+    fun listProjects(context: Context): List<String> {
+        return context.fileList()?.filter { it.endsWith(".json") } ?: emptyList()
+    }
+
+    fun deleteProject(context: Context, filename: String) {
+        val file = File(context.filesDir, filename)
+        if (file.exists()) file.delete()
     }
 }

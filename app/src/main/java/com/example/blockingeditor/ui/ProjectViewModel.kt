@@ -21,6 +21,7 @@ import android.net.Uri
 import com.example.blockingeditor.audio.AudioPlayer
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.*
 
 class ProjectViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -44,6 +45,20 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
+    private val undoStack = mutableListOf<Project>()
+    private val redoStack = mutableListOf<Project>()
+
+    private val _canUndo = MutableStateFlow(false)
+    val canUndo: StateFlow<Boolean> = _canUndo.asStateFlow()
+
+    private val _canRedo = MutableStateFlow(false)
+    val canRedo: StateFlow<Boolean> = _canRedo.asStateFlow()
+
+    private var currentProjectFilename = "project.json"
+
+    private val _projects = MutableStateFlow<List<String>>(emptyList())
+    val projects: StateFlow<List<String>> = _projects.asStateFlow()
+
     private val audioPlayer = AudioPlayer(application)
 
     private val _musicDuration = MutableStateFlow(0)
@@ -58,7 +73,50 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
     // GREEN THEME CONSTANT
     val primaryColor = 0xFF2E7D32 // Material Green 700
 
+    private fun pushToUndo(project: Project) {
+        undoStack.add(project.copy(formations = project.formations.map { f -> f.copy(dancers = f.dancers.map { it.copy() }.toMutableList()) }.toMutableList()))
+        if (undoStack.size > 50) undoStack.removeAt(0)
+        _canUndo.value = undoStack.isNotEmpty()
+        redoStack.clear()
+        _canRedo.value = false
+    }
+
+    fun undo() {
+        if (undoStack.isEmpty()) return
+        val current = _project.value
+        redoStack.add(current)
+        _canRedo.value = true
+        
+        val previous = undoStack.removeAt(undoStack.size - 1)
+        _project.value = previous
+        _canUndo.value = undoStack.isNotEmpty()
+        updateAnimatedDancersAtTime(_currentTimeMs.value)
+        saveProject()
+    }
+
+    fun redo() {
+        if (redoStack.isEmpty()) return
+        val current = _project.value
+        undoStack.add(current)
+        _canUndo.value = true
+        
+        val next = redoStack.removeAt(redoStack.size - 1)
+        _project.value = next
+        _canRedo.value = redoStack.isNotEmpty()
+        updateAnimatedDancersAtTime(_currentTimeMs.value)
+        saveProject()
+    }
+
+    private fun updateProject(action: (Project) -> Project) {
+        val oldProject = _project.value
+        pushToUndo(oldProject)
+        val newProject = action(oldProject)
+        _project.value = newProject
+        saveProject()
+    }
+
     init {
+        refreshProjectList()
         // Init music if exists
         _project.value.musicUri?.let {
             audioPlayer.load(it)
@@ -103,7 +161,47 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun saveProject() {
-        ProjectStorage.saveProject(getApplication(), _project.value)
+        ProjectStorage.saveProject(getApplication(), _project.value, currentProjectFilename)
+    }
+
+    fun refreshProjectList() {
+        _projects.value = ProjectStorage.listProjects(getApplication())
+    }
+
+    fun switchProject(filename: String) {
+        val loaded = ProjectStorage.loadProject(getApplication(), filename)
+        if (loaded != null) {
+            currentProjectFilename = filename
+            _project.value = loaded
+            undoStack.clear()
+            redoStack.clear()
+            _canUndo.value = false
+            _canRedo.value = false
+            _musicDuration.value = 0
+            _currentTimeMs.value = 0L
+            loaded.musicUri?.let {
+                audioPlayer.load(it)
+                _musicDuration.value = audioPlayer.getDuration()
+            }
+            updateAnimatedDancersAtTime(0)
+        }
+    }
+
+    fun createNewProject(name: String) {
+        val newProject = Project(
+            name = name,
+            formations = mutableListOf(Formation("Start", 0L, mutableListOf()))
+        )
+        val filename = "${name.replace(" ", "_")}_${System.currentTimeMillis()}.json"
+        _project.value = newProject
+        currentProjectFilename = filename
+        saveProject()
+        refreshProjectList()
+    }
+
+    fun deleteProject(filename: String) {
+        ProjectStorage.deleteProject(getApplication(), filename)
+        refreshProjectList()
     }
 
     fun playAnimation() {
@@ -138,6 +236,11 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
             _isPlaying.value = false
             if (audioPlayer.getDuration() > 0) audioPlayer.pause()
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        audioPlayer.stop()
     }
 
     fun stopAnimation() {
@@ -197,18 +300,18 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun updateProjectSettings(name: String, width: Float, height: Float) {
-        _project.update { it.copy(name = name, realWidth = width, realHeight = height) }
-        saveProject()
+        updateProject { it.copy(name = name, realWidth = width, realHeight = height) }
     }
 
     fun addDancer(name: String, color: Long) {
-        _project.update { currentProject ->
+        updateProject { currentProject ->
             val formation = currentProject.formations[_currentFormationIndex.value]
             val centerX = currentProject.stageWidth / 2f
             val centerY = currentProject.stageHeight / 2f
             
+            val newId = (formation.dancers.maxOfOrNull { it.id } ?: 0) + 1
             val newDancer = Dancer(
-                id = if (formation.dancers.isEmpty()) 0 else formation.dancers.maxOf { it.id } + 1,
+                id = newId,
                 name = name,
                 color = color,
                 x = centerX,
@@ -223,16 +326,26 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun updateDancerPosition(id: Int, x: Float, y: Float) {
-        // Immediate UI update
-        _currentAnimatedDancers.value = _currentAnimatedDancers.value.map {
-            if (it.id == id) it.copy(x = x, y = y) else it
+        val stageWidth = _project.value.stageWidth
+        
+        // Immediate UI update for smooth dragging (outside undo/redo for performance)
+        _currentAnimatedDancers.value = _currentAnimatedDancers.value.map { d ->
+            when {
+                d.id == id -> d.copy(x = x, y = y)
+                d.mirrorOfId == id -> d.copy(x = stageWidth - x, y = y)
+                else -> d
+            }
         }
 
-        // Persistent update
-        _project.update { currentProject ->
+        // Persistent update with history
+        updateProject { currentProject ->
             val formation = currentProject.formations[_currentFormationIndex.value]
-            val updatedDancers = formation.dancers.map {
-                if (it.id == id) it.copy(x = x, y = y) else it
+            val updatedDancers = formation.dancers.map { d ->
+                when {
+                    d.id == id -> d.copy(x = x, y = y)
+                    d.mirrorOfId == id -> d.copy(x = currentProject.stageWidth - x, y = y)
+                    else -> d
+                }
             }.toMutableList()
             val updatedFormations = currentProject.formations.toMutableList()
             updatedFormations[_currentFormationIndex.value] = formation.copy(dancers = updatedDancers)
@@ -241,37 +354,157 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun removeDancer(id: Int) {
-        _project.update { currentProject ->
+        updateProject { currentProject ->
             val formation = currentProject.formations[_currentFormationIndex.value]
-            val updatedDancers = formation.dancers.filter { it.id != id }.toMutableList()
+            // Filter out the dancer AND clear any mirror links pointing to it
+            val updatedDancers = formation.dancers.filter { it.id != id }.map { d ->
+                if (d.mirrorOfId == id) d.copy(mirrorOfId = null) else d
+            }.toMutableList()
+            
             val updatedFormations = currentProject.formations.toMutableList()
             updatedFormations[_currentFormationIndex.value] = formation.copy(dancers = updatedDancers)
             currentProject.copy(formations = updatedFormations)
         }
+        updateAnimatedDancersAtTime(_currentTimeMs.value)
     }
 
     fun addFormation() {
-        _project.update { currentProject ->
-            val currentTime = _currentTimeMs.value
+        updateProject { currentProject ->
+            var targetTime = _currentTimeMs.value
             val dancers = _currentAnimatedDancers.value.map { it.copy() }.toMutableList()
+            
+            while (currentProject.formations.any { it.timeMs == targetTime }) {
+                targetTime += 1000L
+            }
             
             val newFormation = Formation(
                 name = "Formation ${currentProject.formations.size + 1}",
-                timeMs = currentTime,
+                timeMs = targetTime,
                 dancers = dancers
             )
             val updatedFormations = currentProject.formations.toMutableList()
-            val existingIndex = updatedFormations.indexOfFirst { it.timeMs == currentTime }
-            if (existingIndex != -1) {
-                updatedFormations[existingIndex] = newFormation
-            } else {
-                updatedFormations.add(newFormation)
-                updatedFormations.sortBy { it.timeMs }
-            }
+            updatedFormations.add(newFormation)
+            updatedFormations.sortBy { it.timeMs }
             currentProject.copy(formations = updatedFormations)
         }
-        val foundIndex = _project.value.formations.indexOfLast { it.timeMs <= _currentTimeMs.value }
-        if (foundIndex != -1) _currentFormationIndex.value = foundIndex
+        _currentFormationIndex.value = _project.value.formations.indexOfLast { it.timeMs <= _currentTimeMs.value + 1000L }.coerceAtLeast(0)
+        updateAnimatedDancersAtTime(_currentTimeMs.value)
+    }
+
+    fun removeFormation() {
+        if (_project.value.formations.size <= 1) return
+        updateProject { currentProject ->
+            val updatedFormations = currentProject.formations.toMutableList()
+            updatedFormations.removeAt(_currentFormationIndex.value)
+            currentProject.copy(formations = updatedFormations)
+        }
+        _currentFormationIndex.value = (_currentFormationIndex.value - 1).coerceAtLeast(0)
+        seekTo(_project.value.formations[_currentFormationIndex.value].timeMs.toInt())
+    }
+
+    fun updateDancerName(id: Int, newName: String) {
+        updateProject { currentProject ->
+            val formation = currentProject.formations[_currentFormationIndex.value]
+            val updatedDancers = formation.dancers.map {
+                if (it.id == id) it.copy(name = newName) else it
+            }.toMutableList()
+            val updatedFormations = currentProject.formations.toMutableList()
+            updatedFormations[_currentFormationIndex.value] = formation.copy(dancers = updatedDancers)
+            currentProject.copy(formations = updatedFormations)
+        }
+        updateAnimatedDancersAtTime(_currentTimeMs.value)
+    }
+
+    fun mirrorFormationHorizontal() {
+        updateProject { currentProject ->
+            val formation = currentProject.formations[_currentFormationIndex.value]
+            val stageWidth = currentProject.stageWidth
+            val updatedDancers = formation.dancers.map { seeker ->
+                seeker.copy(x = stageWidth - seeker.x)
+            }.toMutableList()
+            
+            val updatedFormations = currentProject.formations.toMutableList()
+            updatedFormations[_currentFormationIndex.value] = formation.copy(dancers = updatedDancers)
+            currentProject.copy(formations = updatedFormations)
+        }
+        updateAnimatedDancersAtTime(_currentTimeMs.value)
+    }
+
+    fun mirrorFormationVertical() {
+        updateProject { currentProject ->
+            val formation = currentProject.formations[_currentFormationIndex.value]
+            val stageHeight = currentProject.stageHeight
+            val updatedDancers = formation.dancers.map { seeker ->
+                seeker.copy(y = stageHeight - seeker.y)
+            }.toMutableList()
+            
+            val updatedFormations = currentProject.formations.toMutableList()
+            updatedFormations[_currentFormationIndex.value] = formation.copy(dancers = updatedDancers)
+            currentProject.copy(formations = updatedFormations)
+        }
+        updateAnimatedDancersAtTime(_currentTimeMs.value)
+    }
+
+
+    fun clearMirrorLink(dancerId: Int) {
+        updateProject { currentProject ->
+            val formation = currentProject.formations[_currentFormationIndex.value]
+            val updatedDancers = formation.dancers.map { d ->
+                if (d.id == dancerId) d.copy(mirrorOfId = null)
+                else if (d.mirrorOfId == dancerId) d.copy(mirrorOfId = null)
+                else d
+            }.toMutableList()
+            val updatedFormations = currentProject.formations.toMutableList()
+            updatedFormations[_currentFormationIndex.value] = formation.copy(dancers = updatedDancers)
+            currentProject.copy(formations = updatedFormations)
+        }
+        updateAnimatedDancersAtTime(_currentTimeMs.value)
+    }
+
+    fun addMirrorPartner(dancerId: Int) {
+        updateProject { currentProject ->
+            val formation = currentProject.formations[_currentFormationIndex.value]
+            val dancer = formation.dancers.find { it.id == dancerId } ?: return@updateProject currentProject
+            
+            val mirrorX = currentProject.stageWidth - dancer.x
+            val mirrorY = dancer.y
+            
+            // Find existing dancer nearby mirrored pos
+            val existingMirror = formation.dancers.find { 
+                it.id != dancerId && abs(it.x - mirrorX) < 50f && abs(it.y - mirrorY) < 50f 
+            }
+            
+            val updatedFormations = currentProject.formations.toMutableList()
+            val updatedDancers = formation.dancers.toMutableList()
+            
+            if (existingMirror != null) {
+                // Link them
+                updatedDancers.replaceAll { d ->
+                    when (d.id) {
+                        dancerId -> d.copy(mirrorOfId = existingMirror.id, x = mirrorX, y = mirrorY)
+                        existingMirror.id -> d.copy(mirrorOfId = dancerId, x = currentProject.stageWidth - mirrorX, y = mirrorY)
+                        else -> d
+                    }
+                }
+            } else {
+                // Create new mirrored dancer
+                val newId = (updatedDancers.maxOfOrNull { it.id } ?: 0) + 1
+                val mirroredDancer = Dancer(
+                    id = newId,
+                    name = "${dancer.name} (M)",
+                    color = dancer.color,
+                    x = mirrorX,
+                    y = mirrorY,
+                    mirrorOfId = dancerId
+                )
+                updatedDancers.add(mirroredDancer)
+                updatedDancers.replaceAll { if (it.id == dancerId) it.copy(mirrorOfId = newId) else it }
+            }
+            
+            updatedFormations[_currentFormationIndex.value] = formation.copy(dancers = updatedDancers)
+            currentProject.copy(formations = updatedFormations)
+        }
+        updateAnimatedDancersAtTime(_currentTimeMs.value)
     }
 
     fun nextFormation() {
@@ -288,64 +521,9 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun updateDancerName(id: Int, newName: String) {
-        _project.update { currentProject ->
-            val formation = currentProject.formations[_currentFormationIndex.value]
-            val updatedDancers = formation.dancers.map {
-                if (it.id == id) it.copy(name = newName) else it
-            }.toMutableList()
-            val updatedFormations = currentProject.formations.toMutableList()
-            updatedFormations[_currentFormationIndex.value] = formation.copy(dancers = updatedDancers)
-            currentProject.copy(formations = updatedFormations)
-        }
-    }
-
-    fun updateDancerColor(id: Int, newColor: Long) {
-        _project.update { currentProject ->
-            val formation = currentProject.formations[_currentFormationIndex.value]
-            val updatedDancers = formation.dancers.map {
-                if (it.id == id) it.copy(color = newColor) else it
-            }.toMutableList()
-            val updatedFormations = currentProject.formations.toMutableList()
-            updatedFormations[_currentFormationIndex.value] = formation.copy(dancers = updatedDancers)
-            currentProject.copy(formations = updatedFormations)
-        }
-    }
-
-    fun updateFormationTime(timeMs: Long) {
-        _project.update { currentProject ->
-            val updatedFormations = currentProject.formations.toMutableList()
-            updatedFormations[_currentFormationIndex.value] = updatedFormations[_currentFormationIndex.value].copy(timeMs = timeMs)
-            currentProject.copy(formations = updatedFormations)
-        }
-    }
-
-    fun renameFormation(newName: String) {
-        _project.update { currentProject ->
-            val updatedFormations = currentProject.formations.toMutableList()
-            updatedFormations[_currentFormationIndex.value] = updatedFormations[_currentFormationIndex.value].copy(name = newName)
-            currentProject.copy(formations = updatedFormations)
-        }
-    }
-
-    fun mirrorFormationHorizontal() {
-        _project.update { currentProject ->
-            val formation = currentProject.formations[_currentFormationIndex.value]
-            val stageWidth = currentProject.stageWidth
-            val updatedDancers = formation.dancers.map { seeker ->
-                seeker.copy(x = stageWidth - seeker.x)
-            }.toMutableList()
-            
-            val updatedFormations = currentProject.formations.toMutableList()
-            updatedFormations[_currentFormationIndex.value] = formation.copy(dancers = updatedDancers)
-            currentProject.copy(formations = updatedFormations)
-        }
-        updateAnimatedDancersAtTime(_currentTimeMs.value)
-    }
-
     fun copyFromPrevious() {
         if (_currentFormationIndex.value > 0) {
-            _project.update { currentProject ->
+            updateProject { currentProject ->
                 val prevFormation = currentProject.formations[_currentFormationIndex.value - 1]
                 val currentFormation = currentProject.formations[_currentFormationIndex.value]
                 val updatedFormations = currentProject.formations.toMutableList()
@@ -356,6 +534,50 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
             }
             updateAnimatedDancersAtTime(_currentTimeMs.value)
         }
+    }
+
+    fun applyCirclePreset() {
+        updateProject { currentProject ->
+            val formation = currentProject.formations[_currentFormationIndex.value]
+            if (formation.dancers.isEmpty()) return@updateProject currentProject
+            
+            val centerX = currentProject.stageWidth / 2f
+            val centerY = currentProject.stageHeight / 2f
+            val radius = 300f
+            val updatedDancers = formation.dancers.mapIndexed { index, dancer ->
+                val angle = (2 * PI * index / formation.dancers.size).toFloat()
+                dancer.copy(
+                    x = centerX + radius * cos(angle.toDouble()).toFloat(),
+                    y = centerY + radius * sin(angle.toDouble()).toFloat()
+                )
+            }.toMutableList()
+            
+            val updatedFormations = currentProject.formations.toMutableList()
+            updatedFormations[_currentFormationIndex.value] = formation.copy(dancers = updatedDancers)
+            currentProject.copy(formations = updatedFormations)
+        }
+        updateAnimatedDancersAtTime(_currentTimeMs.value)
+    }
+
+    fun applyLinePreset() {
+        updateProject { currentProject ->
+            val formation = currentProject.formations[_currentFormationIndex.value]
+            if (formation.dancers.isEmpty()) return@updateProject currentProject
+            
+            val centerY = currentProject.stageHeight / 2f
+            val startX = 200f
+            val endX = currentProject.stageWidth - 200f
+            val stepX = if (formation.dancers.size > 1) (endX - startX) / (formation.dancers.size - 1) else 0f
+            
+            val updatedDancers = formation.dancers.mapIndexed { index, dancer ->
+                dancer.copy(x = startX + index * stepX, y = centerY)
+            }.toMutableList()
+            
+            val updatedFormations = currentProject.formations.toMutableList()
+            updatedFormations[_currentFormationIndex.value] = formation.copy(dancers = updatedDancers)
+            currentProject.copy(formations = updatedFormations)
+        }
+        updateAnimatedDancersAtTime(_currentTimeMs.value)
     }
 
     fun exportImage() {
@@ -370,17 +592,24 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
         paint.strokeWidth = 1f
         for (x in 0..width step 100) canvas.drawLine(x.toFloat(), 0f, x.toFloat(), height.toFloat(), paint)
         for (y in 0..height step 100) canvas.drawLine(0f, y.toFloat(), width.toFloat(), y.toFloat(), paint)
+        // Fix scaling for image export
+        val scaleX = width.toFloat() / _project.value.stageWidth.coerceAtLeast(1f)
+        val scaleY = height.toFloat() / _project.value.stageHeight.coerceAtLeast(1f)
+
         formation.dancers.forEach { dancer ->
+            val drawX = dancer.x * scaleX
+            val drawY = dancer.y * scaleY
+            
             paint.color = dancer.color.toInt()
-            canvas.drawCircle(dancer.x, dancer.y, 45f, paint)
+            canvas.drawCircle(drawX, drawY, 45f, paint)
             paint.color = android.graphics.Color.WHITE
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = 4f
-            canvas.drawCircle(dancer.x, dancer.y, 45f, paint)
+            canvas.drawCircle(drawX, drawY, 45f, paint)
             paint.style = Paint.Style.FILL
             paint.textSize = 35f
             paint.textAlign = Paint.Align.CENTER
-            canvas.drawText(dancer.name, dancer.x, dancer.y + 80f, paint)
+            canvas.drawText(dancer.name, drawX, drawY + 80f, paint)
         }
         try {
             val file = File(getApplication<Application>().cacheDir, "formation.png")
@@ -420,15 +649,29 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun copyDancerPosition(fromId: Int, toId: Int) {
-        _project.update { currentProject ->
-            val formation = currentProject.formations[_currentFormationIndex.value]
-            val sourceDancer = formation.dancers.find { it.id == fromId } ?: return@update currentProject
-            val updatedDancers = formation.dancers.map {
-                if (it.id == toId) it.copy(x = sourceDancer.x, y = sourceDancer.y) else it
+
+    fun cloneMovement(sourceId: Int, targetId: Int, mirrored: Boolean) {
+        updateProject { currentProject ->
+            val stageWidth = currentProject.stageWidth
+            val updatedFormations = currentProject.formations.map { formation ->
+                val sourceDancer = formation.dancers.find { it.id == sourceId }
+                if (sourceDancer != null) {
+                    val updatedDancers = formation.dancers.map { target ->
+                        if (target.id == targetId) {
+                            if (mirrored) {
+                                target.copy(x = stageWidth - sourceDancer.x, y = sourceDancer.y)
+                            } else {
+                                target.copy(x = sourceDancer.x, y = sourceDancer.y)
+                            }
+                        } else {
+                            target
+                        }
+                    }.toMutableList()
+                    formation.copy(dancers = updatedDancers)
+                } else {
+                    formation
+                }
             }.toMutableList()
-            val updatedFormations = currentProject.formations.toMutableList()
-            updatedFormations[_currentFormationIndex.value] = formation.copy(dancers = updatedDancers)
             currentProject.copy(formations = updatedFormations)
         }
         updateAnimatedDancersAtTime(_currentTimeMs.value)
