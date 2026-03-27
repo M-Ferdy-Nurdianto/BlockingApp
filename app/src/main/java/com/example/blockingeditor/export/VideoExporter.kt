@@ -135,8 +135,9 @@ object VideoExporter {
             
             inputSurface.release()
             
-            // Call onComplete ONLY after resources are safely closed
             if (exportSuccessful) {
+                // Add a small delay for file I/O to stabilize on slow storage
+                Thread.sleep(500)
                 onComplete(outputFile)
             }
         }
@@ -149,9 +150,9 @@ object VideoExporter {
         val scaleX = width.toFloat() / project.stageWidth.coerceAtLeast(1f)
         val scaleY = height.toFloat() / project.stageHeight.coerceAtLeast(1f)
 
-        // Draw GRID
-        paint.color = android.graphics.Color.DKGRAY
-        paint.strokeWidth = 1f
+        // Draw GRID (Increased stroke for visibility)
+        paint.color = android.graphics.Color.GRAY
+        paint.strokeWidth = 2f
         for (x in 0..width step 100) canvas.drawLine(x.toFloat(), 0f, x.toFloat(), height.toFloat(), paint)
         for (y in 0..height step 100) canvas.drawLine(0f, y.toFloat(), width.toFloat(), y.toFloat(), paint)
 
